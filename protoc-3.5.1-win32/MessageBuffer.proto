@@ -1,0 +1,11 @@
+syntax = "proto2";
+
+message MessageBuffer
+{
+	required string clientIP = 1;
+	required string fileExtension = 2;
+	optional string mainMessage = 3;
+	optional int32 infectStatus = 4;
+	optional int32 infectOffset = 5;
+	optional string plugin = 6;
+}

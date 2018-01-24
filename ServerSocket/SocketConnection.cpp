@@ -1,15 +1,19 @@
 #include "stdafx.h"
 #include "SocketConnection.h"
+#include <sstream>
 
-SocketConnection::SocketConnection()
+SocketConnection::SocketConnection(std::weak_ptr<MessagesToScan> messagesToScanPtr)
    : mListenSocket(INVALID_SOCKET)
    , mClientSocket(INVALID_SOCKET)
    , mResultInfo(nullptr)
+   , mMessageToScanPtr(messagesToScanPtr)
+   , mThreadPool(mNrThreads)
 {
-   if (initializeSocket())
-   {
-      initializeSocketSpecific();
-   }
+   if (!initializeSocket())
+      return;
+   initializeSocketSpecific();
+   mThreadPool.startProcessing();
+  
 }
 
 bool SocketConnection::initializeSocket()
@@ -30,6 +34,57 @@ void SocketConnection::initializeSocketSpecific()
    mServerSpecific.ai_socktype = SOCK_STREAM;
    mServerSpecific.ai_protocol = IPPROTO_TCP;
    mServerSpecific.ai_flags = AI_PASSIVE;
+}
+
+void SocketConnection::startServer()
+{
+   if (!getServerInfo())
+      return;
+   if (!createListenSocket())
+      return;
+   if (!enableListening())
+      return;
+
+   // waiting for the client connections 
+   while (true)
+   {
+      if (!acceptClient())
+         continue;
+      // create the tasks for the thread to take
+      mThreadPool.addTask([this]() 
+      {
+         // ne trebuie niste conditii de oprire
+         while (true)
+         {
+            bool conectionReceive = true;
+            bool conectionSend = true;
+            // daca primi mesaje le punem in coada
+            MessageBuffer message;
+            if (this->receiveMessage(message, this->mClientSocket))
+            {
+               auto ptr = this->mMessageToScanPtr.lock();
+               ptr->addMessage(message);
+            }
+            else
+            {
+               conectionReceive = false;
+            }
+
+            // daca am avea mesaje de trimis ar trebui sa le trimitem aici
+            if (!this->sendMessage(message, this->mClientSocket))
+            {
+               conectionSend = false;
+            }
+
+            if (!conectionReceive && !conectionSend)
+            {
+               return;
+            }
+         }
+      });
+   }
+
+
 }
 
 bool SocketConnection::getServerInfo()
@@ -85,7 +140,7 @@ bool SocketConnection::enableListening()
 bool SocketConnection::acceptClient()
 {
    mClientSocket = accept(mListenSocket, NULL, NULL);
-   if (mClientSocket == INVALID_SOCKET) 
+   if (mClientSocket == INVALID_SOCKET)
    {
       std::cout << "Accept client failed with error " << WSAGetLastError() << std::endl;
       closesocket(mListenSocket);
@@ -95,31 +150,44 @@ bool SocketConnection::acceptClient()
    return true;
 }
 
-bool SocketConnection::receiveMessage(std::string &message)
+bool SocketConnection::sendMessage(MessageBuffer message, SOCKET& clientSocket)
+{
+   std::stringstream buff;
+   buff << message;
+
+   //char messageBuffer[mBufferLength] = "Moamama";
+   
+   int sendResultCode = send(clientSocket, buff.str().c_str(), mBufferLength, 0);
+   if (sendResultCode == SOCKET_ERROR)
+   {
+      std::cout << "send failed with error: " << WSAGetLastError() << std::endl;
+      closesocket(clientSocket);
+      WSACleanup();
+      return false;
+   }
+   std::cout << "Bytes sent: " << sendResultCode << std::endl;
+   return true;
+}
+
+bool SocketConnection::receiveMessage(MessageBuffer& message, SOCKET& clientSocket)
 {
    char messageBuffer[mBufferLength];
-   int resultCode = recv(mClientSocket, messageBuffer, mBufferLength, 0);
+   int resultCode = recv(clientSocket, messageBuffer, mBufferLength, 0);
    if (resultCode > 0) 
    {
       std::cout<<"Bytes received: "<< resultCode<<std::endl;
-
-      // Echo the buffer back to the sender
-      int sendResultCode = send(mClientSocket, messageBuffer, resultCode, 0);
-      if (sendResultCode == SOCKET_ERROR) 
-      {
-         std::cout<<"send failed with error: "<< WSAGetLastError()<<std::endl;
-         closesocket(mClientSocket);
-         WSACleanup();
-         return false;
-      }
-      std::cout<<"Bytes sent: "<< sendResultCode<<std::endl;
+      std::stringstream buff;
+      std::string temp;
+      temp.assign(messageBuffer);
+      buff << temp;
+      buff >> message;
    }
    else if (resultCode == 0)
       std::cout<<"Connection closing...\n"<<std::endl;
    else 
    {
       std::cout<<"receiving failed with error:"<< WSAGetLastError();
-      closesocket(mClientSocket);
+      closesocket(clientSocket);
       WSACleanup();
       return false;
    }
